@@ -5,11 +5,11 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Microsoft.EntityFrameworkCore.Metadata.Conventions;
-using Microsoft.EntityFrameworkCore.Metadata.Internal;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -20,8 +20,8 @@ namespace Microsoft.EntityFrameworkCore.Cassandra.Migrations
     public class CassandraHistoryRepository : ICassandraHistoryRepository
     {
         public const string DefaultTableName = "__EFMigrationsHistory";
-        private readonly InternalAnnotatableBuilder<Model> _builder;
-        private IModel _model;
+        private readonly IModel _model;
+        private IModel _historyModel;
         private string _migrationIdColumnName;
         private string _productVersionColumnName;
 
@@ -30,12 +30,13 @@ namespace Microsoft.EntityFrameworkCore.Cassandra.Migrations
             HistoryRepositoryDependencies dependencies)
         {
             var cassandraOptionsExtension = CassandraOptionsExtension.Extract(relationalConnectionDependencies.ContextOptions);
+
             Dependencies = dependencies;
+
             var relationalOptions = RelationalOptionsExtension.Extract(dependencies.Options);
             TableName = relationalOptions?.MigrationsHistoryTableName ?? DefaultTableName;
             TableSchema = cassandraOptionsExtension.DefaultKeyspace;
-            _builder = ((Model)relationalConnectionDependencies.CurrentContext.Context.Model).Builder;
-            EnsureModel();
+            _model = relationalConnectionDependencies.CurrentContext.Context.Model;
         }
 
         protected virtual HistoryRepositoryDependencies Dependencies { get; }
@@ -53,14 +54,20 @@ namespace Microsoft.EntityFrameworkCore.Cassandra.Migrations
                 .FindProperty(nameof(CassandraHistoryRow.ProductVersion))
                 .GetColumnName();
 
-        protected virtual string ExistsScript => $"SELECT count(*) FROM system_schema.tables WHERE keyspace_name='{TableSchema}' and table_name='{TableName}'";
-        
+        protected virtual string ExistsScript => $"SELECT count(keyspace_name) FROM system_schema.tables WHERE keyspace_name='{TableSchema}' and table_name='{TableName}'";
+
         private IModel EnsureModel()
         {
-            if (_model == null)
+            if (_historyModel == null)
             {
+                Debugger.Launch();
                 var conventionSet = Dependencies.ConventionSetBuilder.CreateConventionSet();
                 ConventionSet.Remove(conventionSet.ModelInitializedConventions, typeof(DbSetFindingConvention));
+                if (!(AppContext.TryGetSwitch("Microsoft.EntityFrameworkCore.Issue23312", out var enabled) && enabled))
+                {
+                    ConventionSet.Remove(conventionSet.ModelInitializedConventions, typeof(RelationalDbFunctionAttributeConvention));
+                }
+
                 var modelBuilder = new ModelBuilder(conventionSet);
                 modelBuilder.Entity<CassandraHistoryRow>(
                     x =>
@@ -71,27 +78,25 @@ namespace Microsoft.EntityFrameworkCore.Cassandra.Migrations
                 modelBuilder.Entity<CassandraHistoryRow>()
                     .HasKey(x => x.MigrationId);
                 var model = modelBuilder.Model;
-                foreach(var annotation in _builder.Metadata.GetAnnotations())
-                {
-                    model[annotation.Name] = annotation.Value;
-                }
-
-                _model = modelBuilder.FinalizeModel();
+                _historyModel = modelBuilder.FinalizeModel();
             }
 
-            return _model;
+            return _historyModel;
         }
 
-
-        public bool Exists() => Dependencies.DatabaseCreator.Exists()
-               && InterpretExistsResult(
-                   Dependencies.RawSqlCommandBuilder.Build(ExistsScript).ExecuteScalar(
-                       new RelationalCommandParameterObject(
-                           Dependencies.Connection,
-                           null,
-                           null,
-                           Dependencies.CurrentContext.Context,
-                           Dependencies.CommandLogger)));
+        public bool Exists() 
+        {
+            var exists = Dependencies.DatabaseCreator.Exists()
+              && InterpretExistsResult(
+                  Dependencies.RawSqlCommandBuilder.Build(ExistsScript).ExecuteScalar(
+                      new RelationalCommandParameterObject(
+                          Dependencies.Connection,
+                          null,
+                          null,
+                          Dependencies.CurrentContext.Context,
+                          Dependencies.CommandLogger)));
+            return exists;
+        }
 
         public async Task<bool> ExistsAsync(CancellationToken cancellationToken = default) =>
             await Dependencies.DatabaseCreator.ExistsAsync(cancellationToken)
@@ -171,8 +176,10 @@ namespace Microsoft.EntityFrameworkCore.Cassandra.Migrations
 
         public IEnumerable<string> GetCreateScripts()
         {
-            var operations = Dependencies.ModelDiffer.GetDifferences(null, _model);
-            var commandList = Dependencies.MigrationsSqlGenerator.Generate(operations, _model);
+            var model = EnsureModel();
+
+            var operations = Dependencies.ModelDiffer.GetDifferences(null, model.GetRelationalModel());
+            var commandList = Dependencies.MigrationsSqlGenerator.Generate(operations, model);
             return commandList.Select(c => c.CommandText);
         }
 
@@ -239,6 +246,11 @@ namespace Microsoft.EntityFrameworkCore.Cassandra.Migrations
 
         protected bool InterpretExistsResult(object value)
         {
+            if (value == null)
+            {
+                return false;
+            }
+
             return (Int64)value > 0;
         }
     }

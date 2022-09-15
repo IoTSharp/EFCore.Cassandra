@@ -6,7 +6,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Cassandra.Infrastructure.Internal;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata.Internal;
-using Microsoft.EntityFrameworkCore.Migrations.Internal;
 using Microsoft.EntityFrameworkCore.Storage;
 using System;
 using System.Collections.Concurrent;
@@ -20,7 +19,6 @@ namespace EFCore.Cassandra.Storage.Internal
     {
         private readonly static ConcurrentDictionary<string, Cluster> _clusters = new ConcurrentDictionary<string, Cluster>();
         private CassandraConnectionStringBuilder _connectionStringBuilder;
-        private Cluster _managedCluster;
         private readonly CassandraOptionsExtension _cassandraOptionsExtension;
         private readonly ICurrentDbContext _currentDbContext;
 
@@ -43,7 +41,16 @@ namespace EFCore.Cassandra.Storage.Internal
         {
             if (!_clusters.TryGetValue(_connectionStringBuilder.ClusterName, out Cluster cluster))
             {
-                var builder = _connectionStringBuilder.MakeClusterBuilder();
+                Builder builder;
+                if (_cassandraOptionsExtension.IsConnectionSecured)
+                {
+                    builder = Cluster.Builder();
+                }
+                else
+                {
+                    builder = _connectionStringBuilder.MakeClusterBuilder();
+                }
+
                 OnBuildingCluster(builder);
                 cluster = builder.Build();
                 _clusters.TryAdd(_connectionStringBuilder.ClusterName, cluster);
@@ -77,10 +84,12 @@ namespace EFCore.Cassandra.Storage.Internal
                     var props = properties.GetValue(entityType) as SortedDictionary<string, Property>;
                     foreach (var prop in props)
                     {
+                        /*
                         if (!CassandraMigrationsModelDiffer.CheckProperty(assms, prop.Value))
                         {
                             continue;
                         }
+                        */
 
                         var mapMethod = genericUdtMap.GetMethod("Map").MakeGenericMethod(prop.Value.ClrType);
                         var variable = Expression.Variable(arg, "v");
